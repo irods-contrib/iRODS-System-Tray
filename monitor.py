@@ -1,3 +1,5 @@
+"""Background filesystem monitoring primitives built on watchdog and Qt signals."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,24 +11,45 @@ from watchdog.observers.api import ObservedWatch
 
 
 class EventBridge(QObject):
+    """Expose watchdog activity as Qt signals that the GUI layer can consume safely.
+
+    Watchdog callbacks do not talk directly to widgets. This bridge lets the monitor
+    manager forward background events into Qt's signal/slot system instead.
+    """
+
     file_event = Signal(str, str, bool)
     monitor_error = Signal(str)
 
 
 class IngestionEventHandler(FileSystemEventHandler):
+    """Translate every watchdog filesystem event into the shared event bridge."""
+
     def __init__(self, bridge: EventBridge) -> None:
+        """Keep a reference to the bridge used for cross-thread event forwarding."""
+
         super().__init__()
         self.bridge = bridge
 
     def on_any_event(self, event: FileSystemEvent) -> None:
+        """Emit a compact Qt signal for any file or directory change watchdog sees."""
+
         self.bridge.file_event.emit(event.event_type, event.src_path, event.is_directory)
 
 
 class MonitorManager(QObject):
+    """Own the watchdog observer and keep watched directories in sync with config.
+
+    The tray controller hands this manager the latest directory list and global active
+    flag whenever settings change. The manager is responsible for starting, stopping,
+    scheduling, and unscheduling watches without requiring an application restart.
+    """
+
     file_event = Signal(str, str, bool)
     monitor_error = Signal(str)
 
     def __init__(self) -> None:
+        """Create the observer-facing state and wire internal signals outward."""
+
         super().__init__()
         self._observer: Observer | None = None
         self._bridge = EventBridge()
@@ -36,6 +59,13 @@ class MonitorManager(QObject):
         self._watches: dict[str, ObservedWatch] = {}
 
     def sync(self, directories: list[str], is_active: bool) -> None:
+        """Reconcile active filesystem watches with the latest application state.
+
+        When monitoring is disabled this tears everything down. When enabled, it keeps
+        existing watches that still belong, removes obsolete ones, and schedules new
+        watches for directories that currently exist.
+        """
+
         if not is_active:
             self.stop()
             return
@@ -66,6 +96,8 @@ class MonitorManager(QObject):
             self._watches[directory] = watch
 
     def stop(self) -> None:
+        """Stop the observer thread and clear all in-memory watch registrations."""
+
         if self._observer is None:
             return
 
@@ -75,9 +107,18 @@ class MonitorManager(QObject):
         self._watches.clear()
 
     def shutdown(self) -> None:
+        """Provide a semantic shutdown hook for application exit paths."""
+
         self.stop()
 
     def _ensure_running(self) -> bool:
+        """Start the watchdog observer if needed and report startup failures.
+
+        Returning ``False`` lets callers skip further scheduling work when the monitor
+        backend could not be started, while still keeping the rest of the application
+        responsive.
+        """
+
         if self._observer is not None and self._observer.is_alive():
             return True
 

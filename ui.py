@@ -1,3 +1,5 @@
+"""Settings window widgets and presentation for the tray-based monitor app."""
+
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
@@ -16,11 +18,20 @@ from PySide6.QtWidgets import (
 
 
 class SettingsWindow(QWidget):
+    """Provide the configuration window for monitored folders and recent activity.
+
+    The window emits high-level signals instead of directly changing application state,
+    which keeps the UI focused on presentation while the tray controller performs the
+    actual persistence and monitor updates.
+    """
+
     monitoring_toggled = Signal(bool)
     add_folder_requested = Signal()
     remove_folder_requested = Signal(str)
 
     def __init__(self) -> None:
+        """Construct the minimalist settings UI used by the tray application."""
+
         super().__init__()
         self.setWindowTitle("Ingestion Monitor")
         self.resize(640, 460)
@@ -99,11 +110,15 @@ class SettingsWindow(QWidget):
         )
 
     def set_monitoring_active(self, is_active: bool) -> None:
+        """Update the checkbox state without re-emitting the user-facing toggle signal."""
+
         previous = self.monitor_toggle.blockSignals(True)
         self.monitor_toggle.setChecked(is_active)
         self.monitor_toggle.blockSignals(previous)
 
     def set_directories(self, directories: list[str], invalid_directories: set[str]) -> None:
+        """Refresh the folder list and visually flag directories that no longer exist."""
+
         self.directory_list.clear()
         for directory in directories:
             label = directory
@@ -116,23 +131,33 @@ class SettingsWindow(QWidget):
         self._update_remove_button_state()
 
     def set_status_message(self, message: str, *, is_error: bool = False) -> None:
+        """Show a normal or error status message near the top of the window."""
+
         self.status_label.setText(message)
         color = "#b42318" if is_error else "#344054"
         self.status_label.setStyleSheet(f"color: {color};")
 
     def append_activity(self, message: str) -> None:
+        """Prepend a new activity message and keep only a short rolling history."""
+
         self.activity_list.insertItem(0, message)
         while self.activity_list.count() > 50:
             self.activity_list.takeItem(self.activity_list.count() - 1)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        """Hide the window instead of quitting so tray monitoring keeps running."""
+
         event.ignore()
         self.hide()
 
     def _emit_add_requested(self, _checked: bool = False) -> None:
+        """Translate the add button click into a controller-facing signal."""
+
         self.add_folder_requested.emit()
 
     def _emit_remove_selected(self, _checked: bool = False) -> None:
+        """Emit the currently selected directory so the controller can remove it."""
+
         item = self.directory_list.currentItem()
         if item is None:
             return
@@ -140,4 +165,6 @@ class SettingsWindow(QWidget):
         self.remove_folder_requested.emit(directory)
 
     def _update_remove_button_state(self, *_args) -> None:
+        """Enable removal only when the user has a directory selected in the list."""
+
         self.remove_button.setEnabled(self.directory_list.currentItem() is not None)

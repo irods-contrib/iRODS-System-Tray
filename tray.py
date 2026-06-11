@@ -1,3 +1,5 @@
+"""System tray coordinator tying together config, monitoring, and the settings UI."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,7 +14,16 @@ from ui import SettingsWindow
 
 
 class TrayController(QObject):
+    """Own the long-lived application state and system tray interactions.
+
+    This controller is the central integration point for the app: it loads and saves
+    configuration, updates the watchdog monitor, reacts to GUI events, and handles tray
+    icon behavior so monitoring can continue while the window stays hidden.
+    """
+
     def __init__(self, app: QApplication) -> None:
+        """Build the tray icon, menu, monitor, and settings window for the app."""
+
         super().__init__()
         self.app = app
         self.app.setQuitOnLastWindowClosed(False)
@@ -41,17 +52,23 @@ class TrayController(QObject):
         self.tray_icon.show()
 
     def show_window(self) -> None:
+        """Show and focus the settings window from the tray or startup path."""
+
         self.window.show()
         self.window.raise_()
         self.window.activateWindow()
 
     def toggle_window(self) -> None:
+        """Hide the settings window if visible, otherwise show and focus it."""
+
         if self.window.isVisible():
             self.window.hide()
             return
         self.show_window()
 
     def prompt_add_directory(self) -> None:
+        """Open a native folder picker and add the chosen directory if provided."""
+
         selected = QFileDialog.getExistingDirectory(
             self.window,
             "Select folder to monitor",
@@ -61,6 +78,8 @@ class TrayController(QObject):
             self.add_directory(selected)
 
     def add_directory(self, path: str) -> None:
+        """Normalize and persist a new monitored directory from the UI."""
+
         normalized = normalize_directory(path)
         if normalized in self.config.monitored_directories:
             self.window.set_status_message(f"Already monitoring {normalized}")
@@ -71,6 +90,8 @@ class TrayController(QObject):
         self.window.set_status_message(f"Added {normalized}")
 
     def remove_directory(self, path: str) -> None:
+        """Remove a monitored directory, then persist and resync background watches."""
+
         self.config.monitored_directories = [
             directory for directory in self.config.monitored_directories if directory != path
         ]
@@ -78,19 +99,27 @@ class TrayController(QObject):
         self.window.set_status_message(f"Removed {path}")
 
     def set_monitoring_active(self, is_active: bool) -> None:
+        """Apply the global monitoring toggle from either the tray or the window."""
+
         self.config.is_monitoring_active = is_active
         self._persist_and_sync()
 
     def exit_application(self) -> None:
+        """Save state, stop background monitoring, and quit the Qt application cleanly."""
+
         self.config_store.save(self.config)
         self.monitor.shutdown()
         self.tray_icon.hide()
         self.app.quit()
 
     def _build_icon(self):
+        """Return a standard fallback icon so the tray works without bundled assets."""
+
         return self.app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
 
     def _build_menu(self) -> None:
+        """Create the tray context menu and wire actions to controller methods."""
+
         open_action = self.menu.addAction("Open Settings")
         open_action.triggered.connect(lambda _checked=False: self.show_window())
         self.menu.addAction(self.monitor_toggle_action)
@@ -100,6 +129,8 @@ class TrayController(QObject):
         self.tray_icon.setContextMenu(self.menu)
 
     def _connect_signals(self) -> None:
+        """Connect UI and monitor signals so changes flow through one controller."""
+
         self.window.add_folder_requested.connect(self.prompt_add_directory)
         self.window.remove_folder_requested.connect(self.remove_directory)
         self.window.monitoring_toggled.connect(self.set_monitoring_active)
@@ -107,6 +138,12 @@ class TrayController(QObject):
         self.monitor.monitor_error.connect(self._handle_monitor_error)
 
     def _sync_from_config(self, *, show_status: bool = True) -> None:
+        """Push the current config into the monitor, tray menu, and visible window.
+
+        This keeps every surface of the app consistent after startup or after any user
+        action that changes directories or the global enabled state.
+        """
+
         self.monitor.sync(self.config.monitored_directories, self.config.is_monitoring_active)
 
         invalid_directories = {
@@ -133,11 +170,19 @@ class TrayController(QObject):
                 self.window.set_status_message("Monitoring active.")
 
     def _persist_and_sync(self) -> None:
+        """Save the latest state and immediately refresh monitoring and UI widgets."""
+
         self.config.monitored_directories = list(dict.fromkeys(self.config.monitored_directories))
         self.config_store.save(self.config)
         self._sync_from_config()
 
     def _handle_tray_activation(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        """Interpret tray clicks so single and double clicks both toggle the window.
+
+        A short timer delays the single-click action long enough to detect a possible
+        double-click without triggering both behaviors.
+        """
+
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._single_click_timer.start(self.app.doubleClickInterval())
         elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
@@ -145,9 +190,13 @@ class TrayController(QObject):
             self.toggle_window()
 
     def _handle_file_event(self, event_type: str, path: str, is_directory: bool) -> None:
+        """Format background file events into readable activity log entries."""
+
         entry_type = "folder" if is_directory else "file"
         self.window.append_activity(f"{event_type}: {entry_type} -> {path}")
 
     def _handle_monitor_error(self, message: str) -> None:
+        """Surface monitoring failures in both the status area and activity log."""
+
         self.window.set_status_message(message, is_error=True)
         self.window.append_activity(f"warning: {message}")

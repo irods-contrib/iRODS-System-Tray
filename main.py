@@ -1,3 +1,5 @@
+"""Application entry point for the directory ingestion tray utility."""
+
 from __future__ import annotations
 
 import sys
@@ -8,6 +10,12 @@ from tray import TrayController
 
 
 def main() -> int:
+    """Create the Qt application, validate tray support, and start the event loop.
+
+    The tray controller owns the persistent background services and the settings
+    window, so the entry point only needs to bootstrap Qt and hand off control.
+    """
+
     app = QApplication(sys.argv)
     app.setApplicationName("Directory Ingestion")
     app.setOrganizationName("OpenCode")
