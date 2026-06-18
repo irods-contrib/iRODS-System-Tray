@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Thread
 
-from PySide6.QtCore import QObject, QRectF, Qt, QTimer
+
+from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QSystemTrayIcon, QStyle
 
 LOGO_PATH = Path(__file__).resolve().with_name("irods_logo.svg")
 
-from config import ConfigStore, normalize_directory
+from config import ConfigStore, IRODSEnvironmentStore, normalize_directory
+from irods_worker import IRODSUploadWorker
 from monitor import MonitorManager
 from ui import SettingsWindow
 
@@ -24,6 +27,9 @@ class TrayController(QObject):
     icon behavior so monitoring can continue while the window stays hidden.
     """
 
+    queue_upload = Signal(str, str)
+    notification_open_requested = Signal()
+
     def __init__(self, app: QApplication) -> None:
         """Build the tray icon, menu, monitor, and settings window for the app."""
 
@@ -32,9 +38,18 @@ class TrayController(QObject):
         self.app.setQuitOnLastWindowClosed(False)
 
         self.config_store = ConfigStore()
+        self.irods_environment_store = IRODSEnvironmentStore()
+        self.irods_environment_store.ensure_exists()
         self.config = self.config_store.load()
         self.monitor = MonitorManager()
         self.window = SettingsWindow()
+        self._queued_uploads: dict[str, str] = {}
+        self._is_shutting_down = False
+
+        self.upload_thread = QThread(self)
+        self.upload_worker = IRODSUploadWorker(self.irods_environment_store)
+        self.upload_worker.moveToThread(self.upload_thread)
+        self.upload_thread.start()
 
         self.monitor_toggle_action = QAction("Toggle Monitoring", self)
         self.monitor_toggle_action.setCheckable(True)
@@ -54,11 +69,14 @@ class TrayController(QObject):
         self._build_menu()
         self._connect_signals()
         self._sync_from_config()
+        self.window.set_irods_environment(self.irods_environment_store.load())
         self.tray_icon.show()
+        self.app.aboutToQuit.connect(self.shutdown)
 
     def show_window(self) -> None:
         """Show and focus the settings window from the tray or startup path."""
 
+        self.window.showNormal()
         self.window.show()
         self.window.raise_()
         self.window.activateWindow()
@@ -112,10 +130,48 @@ class TrayController(QObject):
     def exit_application(self) -> None:
         """Save state, stop background monitoring, and quit the Qt application cleanly."""
 
+        self.shutdown()
+        self.app.quit()
+
+    def shutdown(self) -> None:
+        """Stop background services once so any quit path uses the same cleanup."""
+
+        if self._is_shutting_down:
+            return
+
+        self._is_shutting_down = True
         self.config_store.save(self.config)
         self.monitor.shutdown()
+        self.upload_thread.quit()
+        self.upload_thread.wait(5000)
+        self.window.hide()
         self.tray_icon.hide()
-        self.app.quit()
+
+    def save_irods_settings(self) -> None:
+        """Persist the iRODS session settings entered in the settings window."""
+
+        environment = self.window.get_irods_environment()
+        if not all(
+            [
+                environment.irods_host,
+                environment.irods_user_name,
+                environment.irods_password,
+                environment.irods_zone_name,
+                environment.irods_home_collection,
+            ]
+        ):
+            self.window.set_status_message(
+                "Complete all iRODS fields before saving.",
+                is_error=True,
+            )
+            return
+
+        self.irods_environment_store.save(environment)
+        self.window.set_irods_environment(self.irods_environment_store.load())
+        self.window.set_status_message("Saved iRODS settings.")
+        self.window.append_activity(
+            f"saved iRODS settings for {environment.irods_user_name} at {environment.irods_host}:{environment.irods_port}"
+        )
 
     def _build_icon(self) -> QPixmap:
         """Rasterize the iRODS logo SVG."""
@@ -149,9 +205,23 @@ class TrayController(QObject):
 
         self.window.add_folder_requested.connect(self.prompt_add_directory)
         self.window.remove_folder_requested.connect(self.remove_directory)
+        self.window.save_irods_requested.connect(self.save_irods_settings)
         self.window.monitoring_toggled.connect(self.set_monitoring_active)
+        self.notification_open_requested.connect(self.show_window)
         self.monitor.file_event.connect(self._handle_file_event)
+        self.monitor.ingest_requested.connect(self._queue_ingestion)
+        self.monitor.monitored_directory_renamed.connect(self._handle_monitored_directory_renamed)
+        self.monitor.monitored_directory_moved.connect(self._handle_monitored_directory_moved)
+        self.monitor.monitored_directory_deleted.connect(self._handle_monitored_directory_deleted)
         self.monitor.monitor_error.connect(self._handle_monitor_error)
+        self.queue_upload.connect(self.upload_worker.upload_file)
+        self.upload_worker.upload_started.connect(self._handle_upload_started)
+        self.upload_worker.upload_debug.connect(self.window.append_activity)
+        self.upload_worker.upload_cancelled.connect(self._handle_upload_cancelled)
+        self.upload_worker.upload_paths_resolved.connect(self._handle_upload_paths_resolved)
+        self.upload_worker.upload_progress.connect(self._handle_upload_progress)
+        self.upload_worker.upload_finished.connect(self._handle_upload_finished)
+        self.upload_worker.upload_failed.connect(self._handle_upload_failed)
 
     def _sync_from_config(self, *, show_status: bool = True) -> None:
         """Push the current config into the monitor, tray menu, and visible window.
@@ -167,6 +237,14 @@ class TrayController(QObject):
             for directory in self.config.monitored_directories
             if not Path(directory).is_dir()
         }
+        available_directories = [
+            directory
+            for directory in self.config.monitored_directories
+            if directory not in invalid_directories
+        ]
+
+        for directory in available_directories:
+            self.upload_worker.allow_directory_uploads(directory)
 
         self.window.set_monitoring_active(self.config.is_monitoring_active)
         previous = self.monitor_toggle_action.blockSignals(True)
@@ -211,8 +289,206 @@ class TrayController(QObject):
         entry_type = "folder" if is_directory else "file"
         self.window.append_activity(f"{event_type}: {entry_type} -> {path}")
 
+    def _queue_ingestion(self, path: str) -> None:
+        """Forward created and moved files to the iRODS worker thread once per path."""
+
+        if not self.config.is_monitoring_active:
+            return
+
+        normalized_path = str(Path(path).expanduser().resolve(strict=False))
+        monitored_root = self._match_monitored_directory(normalized_path)
+        if monitored_root is None:
+            return
+        if normalized_path in self._queued_uploads:
+            return
+
+        self._queued_uploads[normalized_path] = monitored_root
+        self.window.append_activity(f"queued upload -> {normalized_path}")
+        self.queue_upload.emit(normalized_path, monitored_root)
+
     def _handle_monitor_error(self, message: str) -> None:
         """Surface monitoring failures in both the status area and activity log."""
 
         self.window.set_status_message(message, is_error=True)
         self.window.append_activity(f"warning: {message}")
+
+    def _handle_monitored_directory_renamed(self, old_path: str, new_path: str) -> None:
+        """Persist a new folder path when a watched directory is renamed in place."""
+
+        if old_path not in self.config.monitored_directories:
+            return
+
+        self.config.monitored_directories = [
+            new_path if directory == old_path else directory
+            for directory in self.config.monitored_directories
+        ]
+        self._persist_and_sync()
+        self.window.set_status_message(f"Updated monitored folder to {new_path}")
+        self.window.append_activity(f"folder renamed -> {old_path} to {new_path}")
+
+    def _handle_monitored_directory_moved(self, old_path: str, new_path: str) -> None:
+        """Refresh the UI and notify the user when a watched folder leaves its parent."""
+        
+        print(
+            "[tray] handle monitored directory moved "
+            f"old_path={old_path} ",
+            f"new_path={new_path} ",
+            flush=True,
+        )
+
+        if old_path not in self.config.monitored_directories:
+            print("[tray] path NOT in monitored_directories ", flush=True,)
+            return
+
+        print("[tray] path in monitored_directories ", flush=True,)
+        self._cancel_uploads_for_directory(old_path)
+        self._sync_from_config(show_status=False)
+        self.window.set_status_message(
+            f"{old_path} was moved and is no longer being tracked.",
+            is_error=True,
+        )
+        self.window.append_activity(f"folder moved -> {old_path} to {new_path}")
+        self._show_moved_folder_notification(old_path)
+
+    def _handle_monitored_directory_deleted(self, path: str) -> None:
+        """Refresh the UI when a watched folder is deleted and can no longer be read."""
+        
+        print(
+            "[tray] handle monitored directory deleted "
+            f"path={path} ",
+            flush=True,
+        )
+
+        if path not in self.config.monitored_directories:
+            print("[tray] path NOT in monitored_directories ", flush=True,)
+            return
+
+        print("[tray] path in monitored_directories ", flush=True,)
+
+        self._cancel_uploads_for_directory(path)
+        self._sync_from_config(show_status=False)
+        self.window.set_status_message(
+            f"{path} is no longer available and can no longer be tracked.",
+            is_error=True,
+        )
+        self.window.append_activity(f"folder deleted -> {path}")
+        self._show_moved_folder_notification(path)
+
+    def _handle_upload_started(self, local_path: str, logical_path: str) -> None:
+        """Surface the start of an iRODS upload in the tray window."""
+
+        self.window.set_status_message(f"Uploading {Path(local_path).name} to iRODS...")
+        self.window.append_activity(f"uploading -> {local_path} to {logical_path}")
+
+    def _handle_upload_progress(
+        self,
+        local_path: str,
+        _logical_path: str,
+        bytes_sent: int,
+        total_bytes: int,
+    ) -> None:
+        """Show coarse-grained upload progress without blocking the UI thread."""
+
+        if total_bytes <= 0:
+            self.window.set_status_message(f"Uploading {Path(local_path).name}...")
+            return
+
+        percent_complete = int((bytes_sent / total_bytes) * 100)
+        self.window.set_status_message(
+            f"Uploading {Path(local_path).name}: {percent_complete}%"
+        )
+
+    def _handle_upload_paths_resolved(self, local_path: str, logical_path: str) -> None:
+        """Record the final paths used for the imminent iRODS put operation."""
+
+        self.window.append_activity(
+            f"iRODS put paths -> local={local_path} logical={logical_path}"
+        )
+
+    def _handle_upload_finished(self, local_path: str, logical_path: str) -> None:
+        """Clear queue tracking and log successful background uploads."""
+
+        self._queued_uploads.pop(local_path, None)
+        self.window.set_status_message(f"Uploaded {Path(local_path).name} to iRODS.")
+        self.window.append_activity(f"uploaded -> {local_path} to {logical_path}")
+
+    def _handle_upload_failed(self, local_path: str, message: str) -> None:
+        """Clear queue tracking and surface upload failures to the user."""
+
+        self._queued_uploads.pop(local_path, None)
+        self.window.set_status_message(message, is_error=True)
+        self.window.append_activity(f"upload failed: {local_path} ({message})")
+
+    def _handle_upload_cancelled(self, local_path: str, message: str) -> None:
+        """Drop queued uploads cleanly once a monitored folder becomes unavailable."""
+
+        self._queued_uploads.pop(local_path, None)
+        self.window.append_activity(f"upload cancelled: {local_path} ({message})")
+
+    def _match_monitored_directory(self, path: str) -> str | None:
+        """Return the configured watch root that contains the given file path."""
+
+        candidate = Path(path).expanduser().resolve(strict=False)
+        best_match: str | None = None
+
+        for directory in self.config.monitored_directories:
+            directory_path = Path(directory).expanduser().resolve(strict=False)
+            try:
+                candidate.relative_to(directory_path)
+            except ValueError:
+                continue
+
+            if best_match is None or len(directory) > len(best_match):
+                best_match = directory
+
+        return best_match
+
+    def _cancel_uploads_for_directory(self, directory: str) -> None:
+        """Stop any later queued uploads for a monitored folder that vanished."""
+
+        self.upload_worker.cancel_directory_uploads(directory)
+        self.window.append_activity(
+            f"cancelling queued uploads for unavailable folder -> {directory}"
+        )
+
+    def _show_moved_folder_notification(self, directory: str) -> None:
+        """Send a Windows toast when a monitored folder can no longer be tracked."""
+
+        try:
+            from win11toast import toast
+        except ImportError:
+            self.window.append_activity(
+                "warning: win11toast is unavailable; could not show folder notification"
+            )
+            return
+
+        message = (
+            "A folder monitored for iRODS ingest has been moved or deleted and can no longer be "
+            "tracked. You may need to reselect your monitored folder(s) to compensate."
+        )
+
+        Thread(
+            target=self._run_moved_folder_notification,
+            args=(toast, f"{Path(directory).name}: {message}"),
+            daemon=True,
+        ).start()
+
+    def _handle_notification_click(self, _args=None) -> None:
+        """Bring the configuration window to the foreground from a toast click."""
+
+        self.notification_open_requested.emit()
+
+    def _run_moved_folder_notification(self, toast, body: str) -> None:
+        """Run the blocking toast callback loop away from the Qt GUI thread."""
+
+        try:
+            toast(
+                "Monitored folder unavailable",
+                body,
+                duration="long",
+                on_click=self._handle_notification_click,
+                on_dismissed=lambda _args: None,
+                on_failed=lambda _args: None,
+            )
+        except Exception as exc:
+            print(f"warning: failed to show folder notification ({exc})", flush=True)
