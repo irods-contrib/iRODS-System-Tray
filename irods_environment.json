@@ -1,0 +1,8 @@
+{
+    "irods_host": "127.0.0.1",
+    "irods_port": 1247,
+    "irods_user_name": "alice",
+    "irods_password": "alicepass",
+    "irods_zone_name": "tempZone",
+    "irods_home_collection": "/tempZone/home/alice"
+}

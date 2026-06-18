@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("app_state.json")
+IRODS_ENVIRONMENT_PATH = Path(__file__).resolve().with_name("irods_environment.json")
 
 
 @dataclass(slots=True)
@@ -17,6 +18,18 @@ class AppConfig:
 
     is_monitoring_active: bool = True
     monitored_directories: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class IRODSEnvironment:
+    """Store the persisted iRODS session details used for background uploads."""
+
+    irods_host: str = "127.0.0.1"
+    irods_port: int = 1247
+    irods_user_name: str = "alice"
+    irods_password: str = "alicepass"
+    irods_zone_name: str = "tempZone"
+    irods_home_collection: str = "/tempZone/home/alice"
 
 
 def normalize_directory(path: str) -> str:
@@ -47,6 +60,15 @@ def normalize_directories(paths: Iterable[str]) -> list[str]:
         seen.add(normalized)
         unique_paths.append(normalized)
     return unique_paths
+
+
+def normalize_irods_collection(path: str) -> str:
+    """Return a stable absolute iRODS collection path suitable for uploads."""
+
+    normalized = PurePosixPath(path.strip() or "/").as_posix()
+    if not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return normalized.rstrip("/") or "/"
 
 
 class ConfigStore:
@@ -98,4 +120,74 @@ class ConfigStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.path.with_suffix(".tmp")
         temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temp_path.replace(self.path)
+
+
+class IRODSEnvironmentStore:
+    """Load and save the iRODS client environment in a dedicated JSON file."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or IRODS_ENVIRONMENT_PATH
+
+    def ensure_exists(self) -> None:
+        """Create the environment file with defaults when it is missing."""
+
+        if self.path.exists():
+            return
+        self.save(IRODSEnvironment())
+
+    def load(self) -> IRODSEnvironment:
+        """Read iRODS settings from disk and fall back to sane defaults on errors."""
+
+        if not self.path.exists():
+            return IRODSEnvironment()
+
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return IRODSEnvironment()
+
+        default_environment = IRODSEnvironment()
+        port = payload.get("irods_port", default_environment.irods_port)
+        try:
+            parsed_port = int(port)
+        except (TypeError, ValueError):
+            parsed_port = default_environment.irods_port
+
+        return IRODSEnvironment(
+            irods_host=str(payload.get("irods_host", default_environment.irods_host)).strip(),
+            irods_port=parsed_port,
+            irods_user_name=str(
+                payload.get("irods_user_name", default_environment.irods_user_name)
+            ).strip(),
+            irods_password=str(
+                payload.get("irods_password", default_environment.irods_password)
+            ),
+            irods_zone_name=str(
+                payload.get("irods_zone_name", default_environment.irods_zone_name)
+            ).strip(),
+            irods_home_collection=normalize_irods_collection(
+                str(
+                    payload.get(
+                        "irods_home_collection",
+                        default_environment.irods_home_collection,
+                    )
+                )
+            ),
+        )
+
+    def save(self, environment: IRODSEnvironment) -> None:
+        """Persist iRODS settings in the standard client JSON shape."""
+
+        payload = asdict(environment)
+        payload["irods_host"] = environment.irods_host.strip()
+        payload["irods_port"] = int(environment.irods_port)
+        payload["irods_user_name"] = environment.irods_user_name.strip()
+        payload["irods_zone_name"] = environment.irods_zone_name.strip()
+        payload["irods_home_collection"] = normalize_irods_collection(
+            environment.irods_home_collection
+        )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.path.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(payload, indent=4), encoding="utf-8")
         temp_path.replace(self.path)
