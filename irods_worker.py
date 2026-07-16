@@ -42,8 +42,13 @@ class IRODSUploadWorker(QObject):
         with self._cancelled_monitored_roots_lock:
             self._cancelled_monitored_roots.discard(normalized_root)
 
-    @Slot(str, str)
-    def upload_file(self, local_path: str, monitored_root: str) -> None:
+    @Slot(str, str, str)
+    def upload_file(
+        self,
+        local_path: str,
+        monitored_root: str,
+        target_collection: str,
+    ) -> None:
         """Upload a created or moved file into the configured iRODS collection."""
 
         local_file = Path(local_path).expanduser().resolve(strict=False)
@@ -76,7 +81,7 @@ class IRODSUploadWorker(QObject):
             logical_path = self._build_logical_path(
                 local_file,
                 monitored_directory,
-                environment,
+                target_collection,
             )
             self.upload_debug.emit(
                 f"upload debug -> stage={stage} local={local_file} logical={logical_path}"
@@ -101,7 +106,6 @@ class IRODSUploadWorker(QObject):
             "irods_user_name": environment.irods_user_name,
             "irods_password": environment.irods_password,
             "irods_zone_name": environment.irods_zone_name,
-            "irods_home_collection": environment.irods_home_collection,
         }
         missing = [name for name, value in required_values.items() if not str(value).strip()]
         if missing:
@@ -135,7 +139,7 @@ class IRODSUploadWorker(QObject):
         self,
         local_file: Path,
         monitored_directory: Path,
-        environment: IRODSEnvironment,
+        target_collection: str,
     ) -> str:
         """Map a local file into the configured iRODS collection root."""
 
@@ -144,7 +148,7 @@ class IRODSUploadWorker(QObject):
         except ValueError:
             relative_path = Path(local_file.name)
 
-        logical_root = PurePosixPath(normalize_irods_collection(environment.irods_home_collection))
+        logical_root = PurePosixPath(normalize_irods_collection(target_collection))
         return str(logical_root.joinpath(*relative_path.parts))
 
     def _stream_upload(

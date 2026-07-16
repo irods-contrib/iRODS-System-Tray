@@ -5,15 +5,23 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Thread
 
-
-from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal, QThread
 from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QSystemTrayIcon, QStyle
 
 LOGO_PATH = Path(__file__).resolve().with_name("irods_logo.svg")
 
-from config import ConfigStore, IRODSEnvironmentStore, normalize_directory
+from config import (
+    ConfigStore,
+    IRODSEnvironmentStore,
+    MonitoredDirectory,
+    normalize_directory,
+    normalize_irods_zone_name,
+    normalize_monitored_directories,
+    normalize_target_collection_for_zone,
+    rezone_target_collection,
+)
 from irods_worker import IRODSUploadWorker
 from monitor import MonitorManager
 from ui import SettingsWindow
@@ -27,7 +35,7 @@ class TrayController(QObject):
     icon behavior so monitoring can continue while the window stays hidden.
     """
 
-    queue_upload = Signal(str, str)
+    queue_upload = Signal(str, str, str)
     notification_open_requested = Signal()
 
     def __init__(self, app: QApplication) -> None:
@@ -41,10 +49,13 @@ class TrayController(QObject):
         self.irods_environment_store = IRODSEnvironmentStore()
         self.irods_environment_store.ensure_exists()
         self.config = self.config_store.load()
+        self.environment = self.irods_environment_store.load()
         self.monitor = MonitorManager()
         self.window = SettingsWindow()
         self._queued_uploads: dict[str, str] = {}
         self._is_shutting_down = False
+
+        self._align_directory_targets_with_zone()
 
         self.upload_thread = QThread(self)
         self.upload_worker = IRODSUploadWorker(self.irods_environment_store)
@@ -69,7 +80,7 @@ class TrayController(QObject):
         self._build_menu()
         self._connect_signals()
         self._sync_from_config()
-        self.window.set_irods_environment(self.irods_environment_store.load())
+        self.window.set_irods_environment(self.environment)
         self.tray_icon.show()
         self.app.aboutToQuit.connect(self.shutdown)
 
@@ -89,34 +100,37 @@ class TrayController(QObject):
             return
         self.show_window()
 
-    def prompt_add_directory(self) -> None:
-        """Open a native folder picker and add the chosen directory if provided."""
-
-        selected = QFileDialog.getExistingDirectory(
-            self.window,
-            "Select folder to monitor",
-            str(Path.home()),
-        )
-        if selected:
-            self.add_directory(selected)
-
-    def add_directory(self, path: str) -> None:
+    def add_directory(self, source_directory: str, target_collection: str) -> None:
         """Normalize and persist a new monitored directory from the UI."""
 
-        normalized = normalize_directory(path)
-        if normalized in self.config.monitored_directories:
-            self.window.set_status_message(f"Already monitoring {normalized}")
+        normalized_source = normalize_directory(source_directory)
+        normalized_target = normalize_target_collection_for_zone(
+            target_collection,
+            self.environment.irods_zone_name,
+        )
+        if any(
+            directory.source_directory == normalized_source
+            for directory in self.config.monitored_directories
+        ):
+            self.window.set_status_message(f"Already monitoring {normalized_source}")
             return
 
-        self.config.monitored_directories.append(normalized)
+        self.config.monitored_directories.append(
+            MonitoredDirectory(
+                source_directory=normalized_source,
+                target_collection=normalized_target,
+            )
+        )
         self._persist_and_sync()
-        self.window.set_status_message(f"Added {normalized}")
+        self.window.set_status_message(f"Added {normalized_source}")
 
     def remove_directory(self, path: str) -> None:
         """Remove a monitored directory, then persist and resync background watches."""
 
         self.config.monitored_directories = [
-            directory for directory in self.config.monitored_directories if directory != path
+            directory
+            for directory in self.config.monitored_directories
+            if directory.source_directory != path
         ]
         self._persist_and_sync()
         self.window.set_status_message(f"Removed {path}")
@@ -157,7 +171,6 @@ class TrayController(QObject):
                 environment.irods_user_name,
                 environment.irods_password,
                 environment.irods_zone_name,
-                environment.irods_home_collection,
             ]
         ):
             self.window.set_status_message(
@@ -166,12 +179,28 @@ class TrayController(QObject):
             )
             return
 
+        old_zone_name = self.environment.irods_zone_name
+        new_zone_name = environment.irods_zone_name
+        zone_changed = normalize_irods_zone_name(old_zone_name) != normalize_irods_zone_name(
+            new_zone_name
+        )
+        if zone_changed:
+            self._rezone_directory_targets(old_zone_name, new_zone_name)
+
         self.irods_environment_store.save(environment)
-        self.window.set_irods_environment(self.irods_environment_store.load())
+        self.environment = self.irods_environment_store.load()
+        self.window.set_irods_environment(self.environment)
+        if zone_changed:
+            self.config_store.save(self.config)
+            self._sync_from_config(show_status=False)
         self.window.set_status_message("Saved iRODS settings.")
         self.window.append_activity(
             f"saved iRODS settings for {environment.irods_user_name} at {environment.irods_host}:{environment.irods_port}"
         )
+        if zone_changed:
+            self.window.append_activity(
+                f"updated monitored folder targets to use /{normalize_irods_zone_name(new_zone_name)}"
+            )
 
     def _build_icon(self) -> QPixmap:
         """Rasterize the iRODS logo SVG."""
@@ -203,7 +232,7 @@ class TrayController(QObject):
     def _connect_signals(self) -> None:
         """Connect UI and monitor signals so changes flow through one controller."""
 
-        self.window.add_folder_requested.connect(self.prompt_add_directory)
+        self.window.add_folder_requested.connect(self.add_directory)
         self.window.remove_folder_requested.connect(self.remove_directory)
         self.window.save_irods_requested.connect(self.save_irods_settings)
         self.window.monitoring_toggled.connect(self.set_monitoring_active)
@@ -230,17 +259,25 @@ class TrayController(QObject):
         action that changes directories or the global enabled state.
         """
 
-        self.monitor.sync(self.config.monitored_directories, self.config.is_monitoring_active)
+        monitored_sources = [
+            directory.source_directory for directory in self.config.monitored_directories
+        ]
+        self.monitor.sync(monitored_sources, self.config.is_monitoring_active)
 
         invalid_directories = {
-            directory
+            directory.source_directory
             for directory in self.config.monitored_directories
-            if not Path(directory).is_dir()
+            if not Path(directory.source_directory).is_dir()
         }
         available_directories = [
-            directory
+            directory.source_directory
             for directory in self.config.monitored_directories
-            if directory not in invalid_directories
+            if directory.source_directory not in invalid_directories
+        ]
+        directories_missing_targets = [
+            directory.source_directory
+            for directory in self.config.monitored_directories
+            if not directory.target_collection
         ]
 
         for directory in available_directories:
@@ -255,6 +292,11 @@ class TrayController(QObject):
         if show_status:
             if not self.config.is_monitoring_active:
                 self.window.set_status_message("Monitoring paused.")
+            elif directories_missing_targets:
+                self.window.set_status_message(
+                    f"{len(directories_missing_targets)} monitored folder(s) need a target collection before uploads can run.",
+                    is_error=True,
+                )
             elif invalid_directories:
                 self.window.set_status_message(
                     f"Monitoring active for available folders. {len(invalid_directories)} folder(s) are missing.",
@@ -266,7 +308,9 @@ class TrayController(QObject):
     def _persist_and_sync(self) -> None:
         """Save the latest state and immediately refresh monitoring and UI widgets."""
 
-        self.config.monitored_directories = list(dict.fromkeys(self.config.monitored_directories))
+        self.config.monitored_directories = normalize_monitored_directories(
+            self.config.monitored_directories
+        )
         self.config_store.save(self.config)
         self._sync_from_config()
 
@@ -296,15 +340,26 @@ class TrayController(QObject):
             return
 
         normalized_path = str(Path(path).expanduser().resolve(strict=False))
-        monitored_root = self._match_monitored_directory(normalized_path)
-        if monitored_root is None:
+        monitored_directory = self._match_monitored_directory(normalized_path)
+        if monitored_directory is None:
+            return
+        if not monitored_directory.target_collection:
+            message = (
+                f"No target collection configured for {monitored_directory.source_directory}."
+            )
+            self.window.set_status_message(message, is_error=True)
+            self.window.append_activity(f"warning: {message}")
             return
         if normalized_path in self._queued_uploads:
             return
 
-        self._queued_uploads[normalized_path] = monitored_root
+        self._queued_uploads[normalized_path] = monitored_directory.source_directory
         self.window.append_activity(f"queued upload -> {normalized_path}")
-        self.queue_upload.emit(normalized_path, monitored_root)
+        self.queue_upload.emit(
+            normalized_path,
+            monitored_directory.source_directory,
+            monitored_directory.target_collection,
+        )
 
     def _handle_monitor_error(self, message: str) -> None:
         """Surface monitoring failures in both the status area and activity log."""
@@ -315,13 +370,16 @@ class TrayController(QObject):
     def _handle_monitored_directory_renamed(self, old_path: str, new_path: str) -> None:
         """Persist a new folder path when a watched directory is renamed in place."""
 
-        if old_path not in self.config.monitored_directories:
+        updated = False
+        for directory in self.config.monitored_directories:
+            if directory.source_directory != old_path:
+                continue
+            directory.source_directory = new_path
+            updated = True
+
+        if not updated:
             return
 
-        self.config.monitored_directories = [
-            new_path if directory == old_path else directory
-            for directory in self.config.monitored_directories
-        ]
         self._persist_and_sync()
         self.window.set_status_message(f"Updated monitored folder to {new_path}")
         self.window.append_activity(f"folder renamed -> {old_path} to {new_path}")
@@ -336,7 +394,10 @@ class TrayController(QObject):
             flush=True,
         )
 
-        if old_path not in self.config.monitored_directories:
+        if not any(
+            directory.source_directory == old_path
+            for directory in self.config.monitored_directories
+        ):
             print("[tray] path NOT in monitored_directories ", flush=True,)
             return
 
@@ -359,7 +420,10 @@ class TrayController(QObject):
             flush=True,
         )
 
-        if path not in self.config.monitored_directories:
+        if not any(
+            directory.source_directory == path
+            for directory in self.config.monitored_directories
+        ):
             print("[tray] path NOT in monitored_directories ", flush=True,)
             return
 
@@ -425,20 +489,20 @@ class TrayController(QObject):
         self._queued_uploads.pop(local_path, None)
         self.window.append_activity(f"upload cancelled: {local_path} ({message})")
 
-    def _match_monitored_directory(self, path: str) -> str | None:
+    def _match_monitored_directory(self, path: str) -> MonitoredDirectory | None:
         """Return the configured watch root that contains the given file path."""
 
         candidate = Path(path).expanduser().resolve(strict=False)
-        best_match: str | None = None
+        best_match: MonitoredDirectory | None = None
 
         for directory in self.config.monitored_directories:
-            directory_path = Path(directory).expanduser().resolve(strict=False)
+            directory_path = Path(directory.source_directory).expanduser().resolve(strict=False)
             try:
                 candidate.relative_to(directory_path)
             except ValueError:
                 continue
 
-            if best_match is None or len(directory) > len(best_match):
+            if best_match is None or len(directory.source_directory) > len(best_match.source_directory):
                 best_match = directory
 
         return best_match
@@ -450,6 +514,33 @@ class TrayController(QObject):
         self.window.append_activity(
             f"cancelling queued uploads for unavailable folder -> {directory}"
         )
+
+    def _align_directory_targets_with_zone(self) -> None:
+        """Ensure every stored target collection starts at the current zone root."""
+
+        updated = False
+        for directory in self.config.monitored_directories:
+            normalized_target = normalize_target_collection_for_zone(
+                directory.target_collection,
+                self.environment.irods_zone_name,
+            )
+            if normalized_target == directory.target_collection:
+                continue
+            directory.target_collection = normalized_target
+            updated = True
+
+        if updated:
+            self.config_store.save(self.config)
+
+    def _rezone_directory_targets(self, old_zone_name: str, new_zone_name: str) -> None:
+        """Rewrite stored target collections to follow a newly saved zone name."""
+
+        for directory in self.config.monitored_directories:
+            directory.target_collection = rezone_target_collection(
+                directory.target_collection,
+                old_zone_name,
+                new_zone_name,
+            )
 
     def _show_moved_folder_notification(self, directory: str) -> None:
         """Send a Windows toast when a monitored folder can no longer be tracked."""

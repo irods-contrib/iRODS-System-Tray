@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
@@ -17,7 +17,15 @@ class AppConfig:
     """Store the persisted monitoring toggle and normalized directory list."""
 
     is_monitoring_active: bool = True
-    monitored_directories: list[str] = field(default_factory=list)
+    monitored_directories: list[MonitoredDirectory] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class MonitoredDirectory:
+    """Describe one monitored local folder and its destination iRODS collection."""
+
+    source_directory: str
+    target_collection: str = ""
 
 
 @dataclass(slots=True)
@@ -29,7 +37,6 @@ class IRODSEnvironment:
     irods_user_name: str = "alice"
     irods_password: str = "alicepass"
     irods_zone_name: str = "tempZone"
-    irods_home_collection: str = "/tempZone/home/alice"
 
 
 def normalize_directory(path: str) -> str:
@@ -42,24 +49,50 @@ def normalize_directory(path: str) -> str:
     return str(Path(path).expanduser().resolve(strict=False))
 
 
-def normalize_directories(paths: Iterable[str]) -> list[str]:
-    """Normalize, de-duplicate, and preserve the original order of directory paths.
-
-    The UI and config layer both rely on this to avoid saving repeated entries while
-    still keeping the list stable for display and future reloads.
+def normalize_monitored_directories(
+    directories: Iterable[MonitoredDirectory | dict[str, object]]
+) -> list[MonitoredDirectory]:
+    """Normalize, de-duplicate, and preserve monitored directory order.
     """
 
-    unique_paths: list[str] = []
+    unique_directories: list[MonitoredDirectory] = []
     seen: set[str] = set()
-    for raw_path in paths:
-        if not raw_path:
+    for raw_directory in directories:
+        normalized = _normalize_monitored_directory(raw_directory)
+        if normalized is None:
             continue
-        normalized = normalize_directory(raw_path)
-        if normalized in seen:
+        if normalized.source_directory in seen:
             continue
-        seen.add(normalized)
-        unique_paths.append(normalized)
-    return unique_paths
+        seen.add(normalized.source_directory)
+        unique_directories.append(normalized)
+    return unique_directories
+
+
+def _normalize_monitored_directory(
+    directory: MonitoredDirectory | dict[str, object],
+) -> MonitoredDirectory | None:
+    """Return a normalized monitored directory entry from supported input shapes."""
+
+    if isinstance(directory, MonitoredDirectory):
+        source_directory = directory.source_directory
+        target_collection = directory.target_collection
+    elif isinstance(directory, dict):
+        source_directory = str(directory.get("source_directory", "")).strip()
+        target_collection = str(directory.get("target_collection", "")).strip()
+    else:
+        return None
+
+    if not source_directory:
+        return None
+
+    normalized_target = ""
+    if target_collection:
+        normalized_target = normalize_irods_collection(target_collection)
+
+    return MonitoredDirectory(
+        source_directory=normalize_directory(source_directory),
+        target_collection=normalized_target,
+    )
 
 
 def normalize_irods_collection(path: str) -> str:
@@ -69,6 +102,47 @@ def normalize_irods_collection(path: str) -> str:
     if not normalized.startswith("/"):
         normalized = f"/{normalized}"
     return normalized.rstrip("/") or "/"
+
+
+def normalize_irods_zone_name(zone_name: str) -> str:
+    """Return a stable zone name without surrounding whitespace or slashes."""
+
+    return zone_name.strip().strip("/")
+
+
+def normalize_target_collection_for_zone(path: str, zone_name: str) -> str:
+    """Force a target collection to live beneath the configured iRODS zone root."""
+
+    normalized_zone = normalize_irods_zone_name(zone_name)
+    normalized_path = normalize_irods_collection(path)
+    if not normalized_zone:
+        return normalized_path
+
+    path_parts = [part for part in PurePosixPath(normalized_path).parts if part != "/"]
+    if path_parts and path_parts[0] == normalized_zone:
+        suffix_parts = path_parts[1:]
+    else:
+        suffix_parts = path_parts
+
+    return str(PurePosixPath("/").joinpath(normalized_zone, *suffix_parts))
+
+
+def rezone_target_collection(path: str, old_zone_name: str, new_zone_name: str) -> str:
+    """Move a target collection from one zone root to another, preserving its suffix."""
+
+    normalized_new_zone = normalize_irods_zone_name(new_zone_name)
+    normalized_path = normalize_irods_collection(path)
+    if not normalized_new_zone:
+        return normalized_path
+
+    normalized_old_zone = normalize_irods_zone_name(old_zone_name)
+    path_parts = [part for part in PurePosixPath(normalized_path).parts if part != "/"]
+    if path_parts and path_parts[0] in {normalized_old_zone, normalized_new_zone}:
+        suffix_parts = path_parts[1:]
+    else:
+        suffix_parts = path_parts
+
+    return str(PurePosixPath("/").joinpath(normalized_new_zone, *suffix_parts))
 
 
 class ConfigStore:
@@ -105,7 +179,7 @@ class ConfigStore:
 
         return AppConfig(
             is_monitoring_active=bool(payload.get("is_monitoring_active", True)),
-            monitored_directories=normalize_directories(directories),
+            monitored_directories=normalize_monitored_directories(directories),
         )
 
     def save(self, config: AppConfig) -> None:
@@ -115,8 +189,16 @@ class ConfigStore:
         an interrupted write is less likely to leave behind a partially written config.
         """
 
-        payload = asdict(config)
-        payload["monitored_directories"] = normalize_directories(config.monitored_directories)
+        payload = {
+            "is_monitoring_active": bool(config.is_monitoring_active),
+            "monitored_directories": [
+                {
+                    "source_directory": directory.source_directory,
+                    "target_collection": directory.target_collection,
+                }
+                for directory in normalize_monitored_directories(config.monitored_directories)
+            ],
+        }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.path.with_suffix(".tmp")
         temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -163,30 +245,23 @@ class IRODSEnvironmentStore:
             irods_password=str(
                 payload.get("irods_password", default_environment.irods_password)
             ),
-            irods_zone_name=str(
-                payload.get("irods_zone_name", default_environment.irods_zone_name)
-            ).strip(),
-            irods_home_collection=normalize_irods_collection(
-                str(
-                    payload.get(
-                        "irods_home_collection",
-                        default_environment.irods_home_collection,
-                    )
-                )
-            ),
+            irods_zone_name=normalize_irods_zone_name(
+                str(payload.get("irods_zone_name", default_environment.irods_zone_name))
+            )
+            or default_environment.irods_zone_name,
         )
 
     def save(self, environment: IRODSEnvironment) -> None:
         """Persist iRODS settings in the standard client JSON shape."""
 
-        payload = asdict(environment)
-        payload["irods_host"] = environment.irods_host.strip()
-        payload["irods_port"] = int(environment.irods_port)
-        payload["irods_user_name"] = environment.irods_user_name.strip()
-        payload["irods_zone_name"] = environment.irods_zone_name.strip()
-        payload["irods_home_collection"] = normalize_irods_collection(
-            environment.irods_home_collection
-        )
+        payload = {
+            "irods_host": environment.irods_host.strip(),
+            "irods_port": int(environment.irods_port),
+            "irods_user_name": environment.irods_user_name.strip(),
+            "irods_password": environment.irods_password,
+            "irods_zone_name": normalize_irods_zone_name(environment.irods_zone_name)
+            or IRODSEnvironment().irods_zone_name,
+        }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.path.with_suffix(".tmp")
         temp_path.write_text(json.dumps(payload, indent=4), encoding="utf-8")
