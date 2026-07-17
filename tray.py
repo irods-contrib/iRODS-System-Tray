@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer
-from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QStyle, QSystemTrayIcon
+from PySide6.QtCore import QObject, QRectF, Qt, QTimer
+from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QSystemTrayIcon
+
+LOGO_PATH = Path(__file__).resolve().with_name("irods_logo.svg")
 
 from config import ConfigStore, normalize_directory
 from monitor import MonitorManager
@@ -38,8 +41,10 @@ class TrayController(QObject):
         self.monitor_toggle_action.toggled.connect(self.set_monitoring_active)
         self.menu = QMenu()
 
-        self.tray_icon = QSystemTrayIcon(self._build_icon(), self)
-        self.tray_icon.setToolTip("Directory Ingestion")
+        tray_icon = QIcon(self._build_icon())
+        self.tray_icon = QSystemTrayIcon(tray_icon, self)
+        self.tray_icon.setToolTip("iRODS Ingest")
+        self.window.setWindowIcon(tray_icon)
         self.tray_icon.activated.connect(self._handle_tray_activation)
 
         self._single_click_timer = QTimer(self)
@@ -112,10 +117,21 @@ class TrayController(QObject):
         self.tray_icon.hide()
         self.app.quit()
 
-    def _build_icon(self):
-        """Return a standard fallback icon so the tray works without bundled assets."""
+    def _build_icon(self) -> QPixmap:
+        """Rasterize the iRODS logo SVG."""
 
-        return self.app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        renderer = QSvgRenderer(str(LOGO_PATH))
+        size = renderer.defaultSize().scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio)
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        renderer.render(
+            painter,
+            QRectF((32 - size.width()) / 2, (32 - size.height()) / 2, size.width(), size.height()),
+        )
+        painter.end()
+        return pixmap
 
     def _build_menu(self) -> None:
         """Create the tray context menu and wire actions to controller methods."""
