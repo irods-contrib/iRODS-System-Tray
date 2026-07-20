@@ -14,6 +14,7 @@ LOGO_PATH = Path(__file__).resolve().with_name("irods_logo.svg")
 
 from config import (
     ConfigStore,
+    IRODSEnvironment,
     IRODSEnvironmentStore,
     MonitoredDirectory,
     normalize_directory,
@@ -24,7 +25,7 @@ from config import (
 )
 from irods_worker import IRODSUploadWorker
 from monitor import MonitorManager
-from ui import SettingsWindow
+from ui import LoginDialog, SettingsWindow
 
 
 class TrayController(QObject):
@@ -38,7 +39,7 @@ class TrayController(QObject):
     queue_upload = Signal(str, str, str)
     notification_open_requested = Signal()
 
-    def __init__(self, app: QApplication) -> None:
+    def __init__(self, app: QApplication, *, start_locked: bool = False) -> None:
         """Build the tray icon, menu, monitor, and settings window for the app."""
 
         super().__init__()
@@ -54,6 +55,9 @@ class TrayController(QObject):
         self.window = SettingsWindow()
         self._queued_uploads: dict[str, str] = {}
         self._is_shutting_down = False
+        self._login_dialog: LoginDialog | None = None
+        self._show_window_after_login = False
+        self._is_authenticated = not start_locked
 
         self._align_directory_targets_with_zone()
 
@@ -62,6 +66,10 @@ class TrayController(QObject):
         self.upload_worker.moveToThread(self.upload_thread)
         self.upload_thread.start()
 
+        self.sign_in_action = QAction("Sign In", self)
+        self.sign_in_action.triggered.connect(lambda _checked=False: self.prompt_login())
+        self.sign_out_action = QAction("Sign Out", self)
+        self.sign_out_action.triggered.connect(lambda _checked=False: self.sign_out())
         self.monitor_toggle_action = QAction("Toggle Monitoring", self)
         self.monitor_toggle_action.setCheckable(True)
         self.monitor_toggle_action.toggled.connect(self.set_monitoring_active)
@@ -79,13 +87,20 @@ class TrayController(QObject):
 
         self._build_menu()
         self._connect_signals()
-        self._sync_from_config()
         self.window.set_irods_environment(self.environment)
+        if self._is_authenticated:
+            self._sync_from_config()
+        else:
+            self._apply_locked_state()
         self.tray_icon.show()
         self.app.aboutToQuit.connect(self.shutdown)
 
     def show_window(self) -> None:
         """Show and focus the settings window from the tray or startup path."""
+
+        if not self._is_authenticated:
+            self.prompt_login(show_window_on_success=True)
+            return
 
         self.window.showNormal()
         self.window.show()
@@ -95,10 +110,43 @@ class TrayController(QObject):
     def toggle_window(self) -> None:
         """Hide the settings window if visible, otherwise show and focus it."""
 
+        if not self._is_authenticated:
+            self.prompt_login(show_window_on_success=True)
+            return
+
         if self.window.isVisible():
             self.window.hide()
             return
         self.show_window()
+
+    def prompt_login(self, *, show_window_on_success: bool = False) -> None:
+        """Prompt for iRODS credentials while leaving the tray icon available."""
+
+        self._show_window_after_login = self._show_window_after_login or show_window_on_success
+        if self._login_dialog is not None:
+            self._login_dialog.raise_()
+            self._login_dialog.activateWindow()
+            return
+
+        login_dialog = LoginDialog(self.irods_environment_store.load())
+        login_dialog.setWindowIcon(self.tray_icon.icon())
+        self._login_dialog = login_dialog
+
+        try:
+            if login_dialog.exec() != LoginDialog.DialogCode.Accepted:
+                self._show_window_after_login = False
+                return
+            if login_dialog.authenticated_environment is None:
+                self._show_window_after_login = False
+                return
+
+            self._complete_login(login_dialog.authenticated_environment)
+            if self._show_window_after_login:
+                self.show_window()
+        finally:
+            self._show_window_after_login = False
+            if self._login_dialog is login_dialog:
+                self._login_dialog = None
 
     def add_directory(self, source_directory: str, target_collection: str) -> None:
         """Normalize and persist a new monitored directory from the UI."""
@@ -202,6 +250,20 @@ class TrayController(QObject):
                 f"updated monitored folder targets to use /{normalize_irods_zone_name(new_zone_name)}"
             )
 
+    def sign_out(self) -> None:
+        """Lock the app and return control to the sign-in dialog."""
+
+        if not self._is_authenticated:
+            self.prompt_login(show_window_on_success=True)
+            return
+
+        self._is_authenticated = False
+        self._queued_uploads.clear()
+        self.window.set_irods_environment(self.irods_environment_store.load())
+        self.window.append_activity("signed out")
+        self._apply_locked_state()
+        self.prompt_login(show_window_on_success=True)
+
     def _build_icon(self) -> QPixmap:
         """Rasterize the iRODS logo SVG."""
 
@@ -221,13 +283,17 @@ class TrayController(QObject):
     def _build_menu(self) -> None:
         """Create the tray context menu and wire actions to controller methods."""
 
+        self.menu.addAction(self.sign_in_action)
+        self.menu.addAction(self.sign_out_action)
+        self.auth_separator = self.menu.addSeparator()
         open_action = self.menu.addAction("Open Settings")
         open_action.triggered.connect(lambda _checked=False: self.show_window())
+        self.open_settings_action = open_action
         self.menu.addAction(self.monitor_toggle_action)
-        self.menu.addSeparator()
+        self.exit_separator = self.menu.addSeparator()
         exit_action = self.menu.addAction("Exit")
         exit_action.triggered.connect(lambda _checked=False: self.exit_application())
-        self.tray_icon.setContextMenu(self.menu)
+        self.exit_action = exit_action
 
     def _connect_signals(self) -> None:
         """Connect UI and monitor signals so changes flow through one controller."""
@@ -284,9 +350,19 @@ class TrayController(QObject):
             self.upload_worker.allow_directory_uploads(directory)
 
         self.window.set_monitoring_active(self.config.is_monitoring_active)
+        self.sign_in_action.setVisible(False)
+        self.sign_out_action.setVisible(True)
+        self.sign_out_action.setEnabled(True)
+        self.auth_separator.setVisible(True)
+        self.open_settings_action.setVisible(True)
+        self.open_settings_action.setEnabled(True)
         previous = self.monitor_toggle_action.blockSignals(True)
         self.monitor_toggle_action.setChecked(self.config.is_monitoring_active)
         self.monitor_toggle_action.blockSignals(previous)
+        self.monitor_toggle_action.setVisible(True)
+        self.monitor_toggle_action.setEnabled(True)
+        self.exit_separator.setVisible(True)
+        self.exit_action.setVisible(True)
         self.window.set_directories(self.config.monitored_directories, invalid_directories)
 
         if show_status:
@@ -314,6 +390,33 @@ class TrayController(QObject):
         self.config_store.save(self.config)
         self._sync_from_config()
 
+    def _apply_locked_state(self) -> None:
+        """Keep the tray visible while preventing access to the main app before sign-in."""
+
+        self.monitor.shutdown()
+        self.window.hide()
+        self.window.set_status_message("Sign in required before using the ingestion monitor.")
+        self.sign_in_action.setVisible(True)
+        self.sign_in_action.setEnabled(True)
+        self.sign_out_action.setVisible(False)
+        self.auth_separator.setVisible(False)
+        self.open_settings_action.setVisible(False)
+        self.monitor_toggle_action.setVisible(False)
+        self.exit_separator.setVisible(False)
+        self.exit_action.setVisible(True)
+
+    def _complete_login(self, environment: IRODSEnvironment) -> None:
+        """Persist the authenticated user and unlock the existing application UI."""
+
+        self._is_authenticated = True
+        self.environment = environment
+        self.irods_environment_store.save(environment)
+        self.window.set_irods_environment(environment)
+        self.window.append_activity(
+            f"signed in as {environment.irods_user_name}@{environment.irods_host}:{environment.irods_port}"
+        )
+        self._sync_from_config()
+
     def _handle_tray_activation(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         """Interpret tray clicks so single and double clicks both toggle the window.
 
@@ -323,6 +426,12 @@ class TrayController(QObject):
 
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._single_click_timer.start(self.app.doubleClickInterval())
+        elif reason == QSystemTrayIcon.ActivationReason.Context:
+            tray_geometry = self.tray_icon.geometry()
+            if tray_geometry.isValid():
+                self.menu.popup(tray_geometry.bottomLeft())
+            else:
+                self.menu.popup(self.window.frameGeometry().center())
         elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self._single_click_timer.stop()
             self.toggle_window()
@@ -337,6 +446,8 @@ class TrayController(QObject):
         """Forward created and moved files to the iRODS worker thread once per path."""
 
         if not self.config.is_monitoring_active:
+            return
+        if not self._is_authenticated:
             return
 
         normalized_path = str(Path(path).expanduser().resolve(strict=False))

@@ -19,14 +19,14 @@ def main() -> int:
     """
 
     app = QApplication(sys.argv)
-    app.setApplicationName("System Tray Ingest")
+    app.setApplicationName("Automated Ingest")
     app.setOrganizationName("iRODS")
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
         raise SystemExit("System tray is not available in this environment.")
 
-    controller = TrayController(app)
-    controller.show_window()
+    controller = TrayController(app, start_locked=True)
+    QTimer.singleShot(0, lambda: controller.prompt_login(show_window_on_success=True))
 
     signal.signal(signal.SIGINT, lambda *_args: app.quit())
 
