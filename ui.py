@@ -139,7 +139,6 @@ class LoginDialog(QDialog):
         self.password_input = QLineEdit()
         self.password_input.setPlaceholderText("Enter iRODS password")
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_input.setText(environment.irods_password)
         self.password_input.returnPressed.connect(self._attempt_login)
 
         form_layout.addRow("Host", self.host_input)
@@ -724,7 +723,7 @@ class SettingsWindow(QWidget):
         self.irods_host_input.setText(environment.irods_host)
         self.irods_port_input.setValue(environment.irods_port)
         self.irods_user_name_input.setText(environment.irods_user_name)
-        self.irods_password_input.setText(environment.irods_password)
+        self.irods_password_input.clear()
         self.irods_zone_name_input.setText(environment.irods_zone_name)
         self._irods_zone_for_new_folders = environment.irods_zone_name
 

@@ -213,16 +213,23 @@ class TrayController(QObject):
         """Persist the iRODS session settings entered in the settings window."""
 
         environment = self.window.get_irods_environment()
+        if not environment.irods_password:
+            environment = IRODSEnvironment(
+                irods_host=environment.irods_host,
+                irods_port=environment.irods_port,
+                irods_user_name=environment.irods_user_name,
+                irods_password=self.environment.irods_password,
+                irods_zone_name=environment.irods_zone_name,
+            )
         if not all(
             [
                 environment.irods_host,
                 environment.irods_user_name,
-                environment.irods_password,
                 environment.irods_zone_name,
             ]
         ):
             self.window.set_status_message(
-                "Complete all iRODS fields before saving.",
+                "Complete host, user, and zone before saving.",
                 is_error=True,
             )
             return
@@ -235,8 +242,8 @@ class TrayController(QObject):
         if zone_changed:
             self._rezone_directory_targets(old_zone_name, new_zone_name)
 
-        self.irods_environment_store.save(environment)
-        self.environment = self.irods_environment_store.load()
+        self.irods_environment_store.save(self._without_password(environment))
+        self.environment = environment
         self.window.set_irods_environment(self.environment)
         if zone_changed:
             self.config_store.save(self.config)
@@ -259,7 +266,8 @@ class TrayController(QObject):
 
         self._is_authenticated = False
         self._queued_uploads.clear()
-        self.window.set_irods_environment(self.irods_environment_store.load())
+        self.environment = self.irods_environment_store.load()
+        self.window.set_irods_environment(self.environment)
         self.window.append_activity("signed out")
         self._apply_locked_state()
         self.prompt_login(show_window_on_success=True)
@@ -410,12 +418,23 @@ class TrayController(QObject):
 
         self._is_authenticated = True
         self.environment = environment
-        self.irods_environment_store.save(environment)
+        self.irods_environment_store.save(self._without_password(environment))
         self.window.set_irods_environment(environment)
         self.window.append_activity(
             f"signed in as {environment.irods_user_name}@{environment.irods_host}:{environment.irods_port}"
         )
         self._sync_from_config()
+
+    def _without_password(self, environment: IRODSEnvironment) -> IRODSEnvironment:
+        """Return an environment snapshot safe to persist to disk."""
+
+        return IRODSEnvironment(
+            irods_host=environment.irods_host,
+            irods_port=environment.irods_port,
+            irods_user_name=environment.irods_user_name,
+            irods_password="",
+            irods_zone_name=environment.irods_zone_name,
+        )
 
     def _handle_tray_activation(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         """Interpret tray clicks so single and double clicks both toggle the window.

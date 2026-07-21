@@ -32,10 +32,10 @@ class MonitoredDirectory:
 class IRODSEnvironment:
     """Store the persisted iRODS session details used for background uploads."""
 
-    irods_host: str = "127.0.0.1"
+    irods_host: str = ""
     irods_port: int = 1247
-    irods_user_name: str = "alice"
-    irods_password: str = "alicepass"
+    irods_user_name: str = ""
+    irods_password: str = ""
     irods_zone_name: str = "tempZone"
 
 
@@ -242,9 +242,7 @@ class IRODSEnvironmentStore:
             irods_user_name=str(
                 payload.get("irods_user_name", default_environment.irods_user_name)
             ).strip(),
-            irods_password=str(
-                payload.get("irods_password", default_environment.irods_password)
-            ),
+            irods_password="",
             irods_zone_name=normalize_irods_zone_name(
                 str(payload.get("irods_zone_name", default_environment.irods_zone_name))
             )
@@ -258,7 +256,6 @@ class IRODSEnvironmentStore:
             "irods_host": environment.irods_host.strip(),
             "irods_port": int(environment.irods_port),
             "irods_user_name": environment.irods_user_name.strip(),
-            "irods_password": environment.irods_password,
             "irods_zone_name": normalize_irods_zone_name(environment.irods_zone_name)
             or IRODSEnvironment().irods_zone_name,
         }
