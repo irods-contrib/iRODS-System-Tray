@@ -19,7 +19,7 @@ def main() -> int:
     """
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Automated Ingest")
+    app.setApplicationName("iRODS System Tray")
     app.setOrganizationName("iRODS")
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
