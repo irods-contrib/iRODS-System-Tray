@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Thread
 
-from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal, QThread
+from PySide6.QtCore import QObject, QRectF, Qt, Signal, QThread
 from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QSystemTrayIcon, QStyle
@@ -67,7 +67,9 @@ class TrayController(QObject):
         self.upload_thread.start()
 
         self.sign_in_action = QAction("Sign In", self)
-        self.sign_in_action.triggered.connect(lambda _checked=False: self.prompt_login())
+        self.sign_in_action.triggered.connect(
+            lambda _checked=False: self.prompt_login(show_window_on_success=True)
+        )
         self.sign_out_action = QAction("Sign Out", self)
         self.sign_out_action.triggered.connect(lambda _checked=False: self.sign_out())
         self.monitor_toggle_action = QAction("Toggle Monitoring", self)
@@ -79,13 +81,9 @@ class TrayController(QObject):
         self.tray_icon = QSystemTrayIcon(tray_icon, self)
         self.tray_icon.setToolTip("iRODS Ingest")
         self.window.setWindowIcon(tray_icon)
-        self.tray_icon.activated.connect(self._handle_tray_activation)
-
-        self._single_click_timer = QTimer(self)
-        self._single_click_timer.setSingleShot(True)
-        self._single_click_timer.timeout.connect(self.toggle_window)
 
         self._build_menu()
+        self.tray_icon.setContextMenu(self.menu)
         self._connect_signals()
         self.window.set_irods_environment(self.environment)
         if self._is_authenticated:
@@ -130,10 +128,24 @@ class TrayController(QObject):
 
         login_dialog = LoginDialog(self.irods_environment_store.load())
         login_dialog.setWindowIcon(self.tray_icon.icon())
+        login_dialog.setModal(False)
+        login_dialog.finished.connect(
+            lambda result, dialog=login_dialog: self._handle_login_dialog_finished(dialog, result)
+        )
         self._login_dialog = login_dialog
+        login_dialog.show()
+        login_dialog.raise_()
+        login_dialog.activateWindow()
+
+    def _handle_login_dialog_finished(
+        self,
+        login_dialog: LoginDialog,
+        result: int,
+    ) -> None:
+        """Finish the asynchronous login flow after the dialog closes."""
 
         try:
-            if login_dialog.exec() != LoginDialog.DialogCode.Accepted:
+            if result != LoginDialog.DialogCode.Accepted:
                 self._show_window_after_login = False
                 return
             if login_dialog.authenticated_environment is None:
@@ -147,6 +159,7 @@ class TrayController(QObject):
             self._show_window_after_login = False
             if self._login_dialog is login_dialog:
                 self._login_dialog = None
+            login_dialog.deleteLater()
 
     def add_directory(self, source_directory: str, target_collection: str) -> None:
         """Normalize and persist a new monitored directory from the UI."""
@@ -435,25 +448,6 @@ class TrayController(QObject):
             irods_password="",
             irods_zone_name=environment.irods_zone_name,
         )
-
-    def _handle_tray_activation(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        """Interpret tray clicks so single and double clicks both toggle the window.
-
-        A short timer delays the single-click action long enough to detect a possible
-        double-click without triggering both behaviors.
-        """
-
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self._single_click_timer.start(self.app.doubleClickInterval())
-        elif reason == QSystemTrayIcon.ActivationReason.Context:
-            tray_geometry = self.tray_icon.geometry()
-            if tray_geometry.isValid():
-                self.menu.popup(tray_geometry.bottomLeft())
-            else:
-                self.menu.popup(self.window.frameGeometry().center())
-        elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self._single_click_timer.stop()
-            self.toggle_window()
 
     def _handle_file_event(self, event_type: str, path: str, is_directory: bool) -> None:
         """Format background file events into readable activity log entries."""
