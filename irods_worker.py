@@ -88,7 +88,13 @@ class IRODSUploadWorker(QObject):
             )
             self.upload_started.emit(str(local_file), logical_path)
             stage = "streaming upload"
-            self._stream_upload(local_file, logical_path, total_bytes, environment)
+            self._stream_upload(
+                local_file,
+                logical_path,
+                target_collection,
+                total_bytes,
+                environment,
+            )
         except Exception as exc:  # noqa: BLE001
             self.upload_failed.emit(
                 str(local_file),
@@ -155,6 +161,7 @@ class IRODSUploadWorker(QObject):
         self,
         local_file: Path,
         logical_path: str,
+        target_collection: str,
         total_bytes: int,
         environment: IRODSEnvironment,
     ) -> None:
@@ -174,9 +181,14 @@ class IRODSUploadWorker(QObject):
             password=environment.irods_password,
             zone=environment.irods_zone_name,
         ) as session:
+            destination_collection = str(PurePosixPath(logical_path).parent)
             self.upload_debug.emit(
                 f"upload debug -> stage=session ready zone={environment.irods_zone_name}"
             )
+            self.upload_debug.emit(
+                f"upload debug -> stage=ensuring collection collection={destination_collection}"
+            )
+            self._ensure_collection(session, target_collection, logical_path)
             self.upload_progress.emit(str(local_file), logical_path, 0, total_bytes)
             self.upload_paths_resolved.emit(str(local_file), logical_path)
             self.upload_debug.emit(
@@ -186,6 +198,38 @@ class IRODSUploadWorker(QObject):
             session.data_objects.put(str(local_file), logical_path)
             self.upload_debug.emit("upload debug -> stage=put completed")
             self.upload_progress.emit(str(local_file), logical_path, total_bytes, total_bytes)
+
+    def _ensure_collection(self, session, target_collection: str, logical_path: str) -> None:
+        """Verify the target exists and create only deeper subcollections as needed."""
+
+        normalized_target = normalize_irods_collection(target_collection)
+        destination_collection = normalize_irods_collection(
+            str(PurePosixPath(logical_path).parent)
+        )
+
+        # The configured target is treated as pre-existing and is never auto-created.
+        try:
+            session.collections.get(normalized_target)
+        except Exception as exc: 
+            raise RuntimeError(
+                f"Configured target collection does not exist: {normalized_target}"
+            ) from exc
+
+        if destination_collection == normalized_target:
+            return
+
+        current_path = PurePosixPath(normalized_target)
+
+        for part in PurePosixPath(destination_collection).relative_to(current_path).parts:
+            current_path = current_path.joinpath(part)
+            current_path_str = str(current_path)
+            try:
+                session.collections.get(current_path_str)
+            except Exception:
+                self.upload_debug.emit(
+                    f"upload debug -> stage=creating collection collection={current_path_str}"
+                )
+                session.collections.create(current_path_str)
 
     def _format_exception_message(self, exc: Exception) -> str:
         """Return a stable error string even when the underlying exception is blank."""
