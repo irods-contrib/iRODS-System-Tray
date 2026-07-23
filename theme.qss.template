@@ -1,0 +1,125 @@
+QWidget#settingsWindow {
+    background: $window_bg;
+    color: $text;
+    font-size: 14px;
+}
+
+QLabel#settingsTitleLabel {
+    color: $text;
+    font-size: 24px;
+    font-weight: 600;
+}
+QLabel#settingsSubtitleLabel {
+    color: $muted;
+    font-size: 13px;
+}
+QCheckBox#monitorToggleCheckbox {
+    color: $text;
+    font-size: 15px;
+    font-weight: 600;
+    padding: 6px 0;
+}
+QLabel#settingsStatusLabel {
+    color: $muted;
+    font-size: 13px;
+}
+QLabel#settingsStatusLabel[error="true"] {
+    color: $error;
+}
+QLabel#validationLabel {
+    color: $error;
+    font-size: 13px;
+}
+
+QFrame#irodsCard,
+QFrame#directoryCard {
+    border: 1px solid $border;
+    border-radius: 14px;
+    background: $card_bg;
+}
+QLabel#irodsCardTitle,
+QLabel#directoryCardTitle,
+QLabel#activityTitle {
+    color: $text;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+QWidget#settingsWindow QLineEdit,
+QWidget#settingsWindow QSpinBox {
+    background: $field_bg;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+QWidget#settingsWindow QLineEdit:focus,
+QWidget#settingsWindow QSpinBox:focus {
+    border: 1px solid $accent;
+}
+
+QWidget#settingsWindow QListWidget {
+    border: 1px solid $border;
+    border-radius: 10px;
+    background: $field_bg;
+    color: $text;
+    padding: 4px;
+}
+QWidget#settingsWindow QListWidget::item {
+    padding: 6px 8px;
+    border-radius: 6px;
+}
+QWidget#settingsWindow QListWidget::item:selected {
+    background: $accent;
+    color: $accent_text;
+}
+
+QWidget#settingsWindow QPushButton {
+    background: $accent;
+    color: $accent_text;
+    border-radius: 10px;
+    padding: 10px 14px;
+}
+QWidget#settingsWindow QPushButton:hover {
+    background: $accent_hover;
+}
+QWidget#settingsWindow QPushButton:pressed {
+    background: $accent_pressed;
+}
+QWidget#settingsWindow QPushButton:disabled {
+    background: $disabled_bg;
+    color: $disabled_text;
+}
+
+QWidget#settingsWindow QPushButton[variant="pill"] {
+    background: transparent;
+    color: $accent;
+    border: 1px solid $accent;
+}
+QWidget#settingsWindow QPushButton[variant="pill"]:hover {
+    background: $field_bg;
+}
+QWidget#settingsWindow QPushButton[variant="pill"]:pressed {
+    background: $border;
+}
+QWidget#settingsWindow QPushButton[variant="pill"]:disabled {
+    background: transparent;
+    color: $muted;
+    border: 1px solid $border;
+}
+
+QWidget#settingsWindow QPushButton[variant="ghost"] {
+    background: transparent;
+    color: $accent;
+    border: none;
+    padding: 8px 10px;
+}
+QWidget#settingsWindow QPushButton[variant="ghost"]:hover {
+    color: $accent_hover;
+}
+QWidget#settingsWindow QPushButton[variant="ghost"]:pressed {
+    color: $accent_pressed;
+}
+QWidget#settingsWindow QPushButton[variant="ghost"]:disabled {
+    color: $muted;
+}

@@ -27,6 +27,14 @@ from PySide6.QtWidgets import (
 from config import IRODSEnvironment, MonitoredDirectory, normalize_irods_zone_name
 
 
+def _set_label_error_state(label: QLabel, is_error: bool) -> None:
+    """Toggle QSS 'error' property so theme.qss.template can recolor the label."""
+
+    label.setProperty("error", is_error)
+    label.style().unpolish(label)
+    label.style().polish(label)
+
+
 class ZoneRootLineEdit(QLineEdit):
     """Keep an iRODS collection input anchored beneath an uneditable zone prefix."""
 
@@ -138,6 +146,7 @@ class AddDirectoryDialog(QDialog):
         self.source_directory_input = QLineEdit()
         self.source_directory_input.setPlaceholderText("Choose a folder to monitor")
         browse_button = QPushButton("Browse")
+        browse_button.setProperty("variant", "ghost")
         browse_button.clicked.connect(self._choose_source_directory)
 
         source_layout = QHBoxLayout()
@@ -155,11 +164,14 @@ class AddDirectoryDialog(QDialog):
         form_layout.addRow("Target collection", self.target_collection_input)
 
         self.validation_label = QLabel()
-        self.validation_label.setStyleSheet("color: #b42318;")
+        self.validation_label.setObjectName("validationLabel")
         self.validation_label.setWordWrap(True)
 
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setProperty(
+            "variant", "pill"
         )
         self.button_box.accepted.connect(self._accept_if_valid)
         self.button_box.rejected.connect(self.reject)
@@ -216,38 +228,35 @@ class SettingsWindow(QWidget):
         """Construct the minimalist settings UI used by the tray application."""
 
         super().__init__()
+        self.setObjectName("settingsWindow")
         self.setWindowTitle("Ingestion Monitor")
         self.resize(640, 460)
         self._irods_zone_for_new_folders = "tempZone"
 
         self.title_label = QLabel("Directory Ingestion")
-        self.title_label.setStyleSheet("font-size: 24px; font-weight: 600;")
+        self.title_label.setObjectName("settingsTitleLabel")
 
         self.subtitle_label = QLabel("Monitor folders in the background from the system tray.")
-        self.subtitle_label.setStyleSheet("color: #667085;")
+        self.subtitle_label.setObjectName("settingsSubtitleLabel")
 
         self.monitor_toggle = QCheckBox("Background monitoring enabled")
         self.monitor_toggle.toggled.connect(self.monitoring_toggled)
-        self.monitor_toggle.setStyleSheet(
-            "QCheckBox { font-size: 15px; font-weight: 600; padding: 6px 0; }"
-        )
+        self.monitor_toggle.setObjectName("monitorToggleCheckbox")
 
         self.status_label = QLabel("Ready")
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet("color: #344054;")
+        self.status_label.setObjectName("settingsStatusLabel")
 
         irods_card = QFrame()
         irods_card.setFrameShape(QFrame.Shape.StyledPanel)
-        irods_card.setStyleSheet(
-            "QFrame { border: 1px solid #d0d5dd; border-radius: 14px; background: #ffffff; }"
-        )
+        irods_card.setObjectName("irodsCard")
 
         irods_layout = QVBoxLayout(irods_card)
         irods_layout.setContentsMargins(16, 16, 16, 16)
         irods_layout.setSpacing(12)
 
         irods_title = QLabel("iRODS session")
-        irods_title.setStyleSheet("font-size: 16px; font-weight: 600;")
+        irods_title.setObjectName("irodsCardTitle")
 
         form_layout = QFormLayout()
         form_layout.setSpacing(10)
@@ -279,16 +288,14 @@ class SettingsWindow(QWidget):
 
         directory_card = QFrame()
         directory_card.setFrameShape(QFrame.Shape.StyledPanel)
-        directory_card.setStyleSheet(
-            "QFrame { border: 1px solid #d0d5dd; border-radius: 14px; background: #ffffff; }"
-        )
+        directory_card.setObjectName("directoryCard")
 
         directory_layout = QVBoxLayout(directory_card)
         directory_layout.setContentsMargins(16, 16, 16, 16)
         directory_layout.setSpacing(12)
 
         directory_title = QLabel("Monitored folders")
-        directory_title.setStyleSheet("font-size: 16px; font-weight: 600;")
+        directory_title.setObjectName("directoryCardTitle")
 
         self.directory_list = QListWidget()
         self.directory_list.currentItemChanged.connect(self._update_remove_button_state)
@@ -299,6 +306,7 @@ class SettingsWindow(QWidget):
         self.add_button = QPushButton("Add Folder")
         self.add_button.clicked.connect(self._emit_add_requested)
         self.remove_button = QPushButton("Remove Folder")
+        self.remove_button.setProperty("variant", "pill")
         self.remove_button.clicked.connect(self._emit_remove_selected)
         self.remove_button.setEnabled(False)
 
@@ -311,7 +319,7 @@ class SettingsWindow(QWidget):
         directory_layout.addLayout(button_row)
 
         activity_title = QLabel("Recent activity")
-        activity_title.setStyleSheet("font-size: 16px; font-weight: 600;")
+        activity_title.setObjectName("activityTitle")
 
         self.activity_list = QListWidget()
         self.activity_list.setMaximumHeight(140)
@@ -327,13 +335,6 @@ class SettingsWindow(QWidget):
         layout.addWidget(directory_card, 1)
         layout.addWidget(activity_title)
         layout.addWidget(self.activity_list)
-
-        self.setStyleSheet(
-            "QWidget { background: #f8fafc; color: #101828; }"
-            "QPushButton { background: #101828; color: white; border-radius: 10px; padding: 10px 14px; }"
-            "QPushButton:disabled { background: #98a2b3; }"
-            "QListWidget { border: 1px solid #d0d5dd; border-radius: 10px; background: white; padding: 4px; }"
-        )
 
     def set_monitoring_active(self, is_active: bool) -> None:
         """Update the checkbox state without re-emitting the user-facing toggle signal."""
@@ -393,8 +394,7 @@ class SettingsWindow(QWidget):
         """Show a normal or error status message near the top of the window."""
 
         self.status_label.setText(message)
-        color = "#b42318" if is_error else "#344054"
-        self.status_label.setStyleSheet(f"color: {color};")
+        _set_label_error_state(self.status_label, is_error)
 
     def append_activity(self, message: str) -> None:
         """Prepend a new activity message and keep only a short rolling history."""
