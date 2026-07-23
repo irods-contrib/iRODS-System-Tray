@@ -274,7 +274,6 @@ class TrayController(QObject):
         """Lock the app and return control to the sign-in dialog."""
 
         if not self._is_authenticated:
-            self.prompt_login(show_window_on_success=True)
             return
 
         self._is_authenticated = False
