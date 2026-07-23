@@ -35,20 +35,9 @@ class LoginWorker(QObject):
     finished = Signal()
     CONNECTION_PRECHECK_TIMEOUT_SECONDS = 5.0
 
-    def __init__(
-        self,
-        host: str,
-        port: int,
-        zone_name: str,
-        user_name: str,
-        password: str,
-    ) -> None:
+    def __init__(self, environment: IRODSEnvironment) -> None:
         super().__init__()
-        self._host = host
-        self._port = port
-        self._zone_name = zone_name
-        self._user_name = user_name
-        self._password = password
+        self._environment = environment
 
     @Slot()
     def authenticate(self) -> None:
@@ -56,7 +45,7 @@ class LoginWorker(QObject):
 
         try:
             with socket.create_connection(
-                (self._host, self._port),
+                (self._environment.irods_host, self._environment.irods_port),
                 timeout=self.CONNECTION_PRECHECK_TIMEOUT_SECONDS,
             ):
                 pass
@@ -79,13 +68,16 @@ class LoginWorker(QObject):
 
         try:
             with iRODSSession(
-                host=self._host,
-                port=self._port,
-                user=self._user_name,
-                password=self._password,
-                zone=self._zone_name,
+                host=self._environment.irods_host,
+                port=self._environment.irods_port,
+                user=self._environment.irods_user_name,
+                password=self._environment.irods_password,
+                zone=self._environment.irods_zone_name,
             ) as session:
-                session.users.get(self._user_name, self._zone_name)
+                session.users.get(
+                    self._environment.irods_user_name,
+                    self._environment.irods_zone_name,
+                )
         except Exception as exc:  # noqa: BLE001
             self.authentication_finished.emit(False, exc)
         else:
@@ -220,11 +212,13 @@ class LoginDialog(QDialog):
             entered_password,
         )
         self._start_authentication(
-            entered_host,
-            entered_port,
-            entered_zone,
-            entered_user,
-            entered_password,
+            IRODSEnvironment(
+                irods_host=entered_host,
+                irods_port=entered_port,
+                irods_user_name=entered_user,
+                irods_password=entered_password,
+                irods_zone_name=entered_zone,
+            )
         )
 
     def _format_login_error(self, exc: Exception) -> str:
@@ -292,21 +286,14 @@ class LoginDialog(QDialog):
             return
         super().reject()
 
-    def _start_authentication(
-        self,
-        host: str,
-        port: int,
-        zone_name: str,
-        user_name: str,
-        password: str,
-    ) -> None:
+    def _start_authentication(self, environment: IRODSEnvironment) -> None:
         """Run iRODS authentication on a worker thread and report the result later."""
 
         self._set_authentication_in_progress(True)
         self._auth_result = None
 
         thread = QThread(self)
-        worker = LoginWorker(host, port, zone_name, user_name, password)
+        worker = LoginWorker(environment)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.authenticate)
