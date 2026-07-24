@@ -44,17 +44,6 @@ class LoginWorker(QObject):
         """Attempt a real iRODS login without blocking the Qt UI thread."""
 
         try:
-            with socket.create_connection(
-                (self._environment.irods_host, self._environment.irods_port),
-                timeout=self.CONNECTION_PRECHECK_TIMEOUT_SECONDS,
-            ):
-                pass
-        except OSError as exc:
-            self.authentication_finished.emit(False, exc)
-            self.finished.emit()
-            return
-
-        try:
             from irods.session import iRODSSession
         except ImportError as exc:  # pragma: no cover - environment dependent
             self.authentication_finished.emit(
@@ -63,6 +52,17 @@ class LoginWorker(QObject):
                     "python-irodsclient is not installed. Install it to enable iRODS login."
                 ),
             )
+            self.finished.emit()
+            return
+
+        try:
+            with socket.create_connection(
+                (self._environment.irods_host, self._environment.irods_port),
+                timeout=self.CONNECTION_PRECHECK_TIMEOUT_SECONDS,
+            ):
+                pass
+        except OSError as exc:
+            self.authentication_finished.emit(False, exc)
             self.finished.emit()
             return
 
